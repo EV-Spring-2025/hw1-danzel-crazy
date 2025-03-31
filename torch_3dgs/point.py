@@ -25,21 +25,55 @@ def get_point_clouds(cameras, depths, alphas, rgbs=None):
     assert (depths.shape == alphas.shape)
     coords = []
     rgbas = []
+    device = depths.device
 
-    # TODO: Compute ray origins and directions for each pixel
-    # Hint: You need to use the camera intrinsics (intrinsics) and extrinsics (c2ws)
-    # to convert pixel coordinates into world-space rays.
-    # rays_o, rays_d = ......
+    for idx, h, w , intrinsic, c2w, depth, alpha in enumerate(zip(Hs, Ws, intrinsics, c2ws, depths, alphas)):
+        
+        # 2) Create a grid of pixel coordinates in homogeneous form: (3, H*W)
+            #Here, we flatten them for easier matrix multiplication.
+            i_coords = torch.arange(W, device=device)  # 0..W-1
+            j_coords = torch.arange(H, device=device)  # 0..H-1
+            i_grid, j_grid = torch.meshgrid(i_coords, j_coords, indexing="xy")  # shape (W, H) each
 
-    # TODO: Compute 3D world coordinates using depth values
-    # Hint: Use the ray equation: P = O + D * depth
-    # P: 3D point, O: ray origin, D: ray direction, depth: depth value
-    # pts = ......
+            # Flatten to (W*H,)
+            i_flat = i_grid.flatten()
+            j_flat = j_grid.flatten()
+            pix_coords = torch.stack([i_flat, j_flat, torch.ones_like(i_flat)], dim=0)  # shape: (3, H*W)
 
-    # TODO: Apply the alpha mask to filter valid points
-    # Hint: Mask should be applied to both coordinates and RGB values (if provided)
-    # mask = ......
-    # coords = pts[mask].cpu().numpy()
+            # 3) Multiply by the inverse of intrinsics to get camera directions (unnormalized).
+            K_inv = torch.linalg.inv(intrinsic)         # shape: (3, 3)
+            pix_coords = pix_coords.to(dtype=torch.float32)  # Ensure dtype is torch.float32
+            print(f'type of K_inv : {K_inv.dtype}')
+            print(f'type of pix_coords : {pix_coords.dtype}')
+            cam_dirs = K_inv @ pix_coords               # shape (3, W*H)
+
+            # 4) Multiply each ray direction by the corresponding depth to get actual camera-frame 3D coords.
+            depth_flat = depth.flatten()                # shape (W*H,)
+            cam_points_3D = cam_dirs * depth_flat       # shape (3, W*H)
+
+            # 5) Convert to homogeneous camera coordinates: (4, W*H)
+            ones = torch.ones(1, cam_points_3D.shape[1], device=device)
+            cam_points_hom = torch.cat([cam_points_3D, ones], dim=0)  # shape (4, W*H)
+
+            # 6) Transform these camera points into world coordinates using c2w (camera->world).
+            world_points_hom = c2w @ cam_points_hom  # shape (4, W*H) do i need to inverse it ? 
+
+            # 7) Divide by the last row (perspective division) to get 3D points in world coords.
+            # world_points_3D = world_points_hom[:3]
+            world_points_3D = world_points_hom[:3] / world_points_hom[3].unsqueeze(0)  # shape (3, W*H)
+
+            # 8) Reshape to (H, W, 3) so it matches the image layout.
+            rays_d = world_points_3D.permute(1, 0).reshape(H, W, 3)  # shape (H, W, 3)
+
+            # 9) get rays center
+            rays_o = np.broadcast_to(c2w[:3, 3], rays_d.shape)  # Shape: (H, W, 3)
+            rays_o = torch.tensor(rays_o, dtype=torch.float32).to(depth.device)
+
+            # pts = rays_o + rays_d * depths[0][..., np.newaxis]  # Shape: (H, W, 3)
+            pts = rays_o + rays_d
+            mask = alphas[0].bool()  # Shape: (H, W)
+            valid_pts = pts[mask].cpu().numpy()  # Extract only valid 3D points
+            coords.append(valid_pts)
 
     if rgbs is not None:
         channels = dict(

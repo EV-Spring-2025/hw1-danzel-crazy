@@ -11,5 +11,6 @@ lr: 1e-3
 eval_interval: 500
 output_folder: outputs
 device: cuda
+# device: cpu
 render:
   tile_size: 50
